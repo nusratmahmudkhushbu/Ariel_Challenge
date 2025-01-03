@@ -1,0 +1,712 @@
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from OpenGL.GLUT import *
+import random
+import numpy as np
+import math
+
+# Screen and game state setup
+widthofscreen, heightofscreen = 1500, 1000
+catch1 = widthofscreen // 8
+catch2 = 280
+bullets = []
+obstacles = []
+powerups = []
+particles = []
+level = "EASY"
+lives = 3
+score = 0
+game_over = False
+pause = False
+rotation = 0
+background_offset = 0
+shield_active = False
+shield_timer = 0
+invincible = False
+last_shot_time = 0
+
+# Level configurations
+level_configs = {
+    "EASY": {
+        "obstacle_speed": 2,
+        "spawn_rate": 0.05,
+        "next_level_score": 1000,
+        "obstacle_size": (15, 30)
+    },
+    "MEDIUM": {
+        "obstacle_speed": 4,
+        "spawn_rate": 0.08,
+        "next_level_score": 2500,
+        "obstacle_size": (25, 40)
+    },
+    "HARD": {
+        "obstacle_speed": 6,
+        "spawn_rate": 0.12,
+        "next_level_score": float('inf'),
+        "obstacle_size": (35, 50)
+    }
+}
+
+
+# Particle system
+class Particle:
+    def __init__(self, x, y, color, lifetime=30):
+        self.x = x
+        self.y = y
+        self.dx = random.uniform(-2, 2)
+        self.dy = random.uniform(-2, 2)
+        self.color = color
+        self.lifetime = lifetime
+        self.size = random.randint(2, 5)
+
+
+def create_particles(x, y, color, count=10):
+    for _ in range(count):
+        particles.append(Particle(x, y, color))
+
+
+def update_particles():
+    for particle in particles[:]:
+        particle.x += particle.dx
+        particle.y += particle.dy
+        particle.lifetime -= 1
+        if particle.lifetime <= 0:
+            particles.remove(particle)
+
+
+def create_powerup():
+    x = random.randint(1500, 1800)  # Spawning off-screen (right side)
+    y = random.randint(50, heightofscreen - 50)  # Full height range
+    powerup_type = random.choice(["life", "shield", "score_boost"])  # Random type
+    powerups.append({"x": x, "y": y, "type": powerup_type, "size": 20})
+
+
+# def create_obstacle():
+#     config = level_configs[level]
+#     x = random.randint(1500, 1800)  # Spawning off-screen (right side)
+#     y = random.randint(50, heightofscreen - 50)  # Full height range with padding
+#     size = random.randint(*config["obstacle_size"])
+#     obstacle_type = random.choice(["normal", "exploding", "splitting"])
+#     obstacles.append({"x": x, "y": y, "size": size, "type": obstacle_type})
+
+def create_obstacle():
+    config = level_configs[level]
+    x = random.randint(1500, 1800)  # Spawning off-screen (right side)
+    y = random.randint(50, heightofscreen - 50)  # Full height range
+    size = random.randint(*config["obstacle_size"])
+
+    # Determine obstacle type with rarity for purple dots
+    obstacle_type = random.choices(
+        ["normal", "exploding", "splitting", "purple"],
+        weights=[70, 10, 5, 15],  # Purple dots are rare
+        k=1
+    )[0]
+
+    speed = config["obstacle_speed"]
+    if obstacle_type == "purple":
+        speed *= 3  # Purple dots are very fast
+
+    obstacles.append({"x": x, "y": y, "size": size, "type": obstacle_type, "speed": speed})
+
+
+# Drawing functions
+def draw_spaceship(x, y):
+    global rotation, shield_active
+
+    glPushMatrix()
+    glTranslatef(x, y, 0)
+    glRotatef(rotation, 0, 0, 1)
+
+    # Ship body
+    glColor3f(0.7, 0.7, 0.9)
+    glPointSize(4)
+    glBegin(GL_POINTS)
+    for i in range(360):
+        angle = math.radians(i)
+        glVertex2f(30 * math.cos(angle), 20 * math.sin(angle))
+    glEnd()
+
+    # Shield effect
+    if shield_active:
+        glColor3f(0.3, 0.8, 1.0)
+        glPointSize(4)
+        glBegin(GL_POINTS)
+        for i in range(360):
+            angle = math.radians(i)
+            glVertex2f(40 * math.cos(angle), 30 * math.sin(angle))
+        glEnd()
+
+    glPopMatrix()
+    rotation += 0.5 if not pause else 0
+
+
+def draw_background():
+    global background_offset
+
+    # Star layers
+    layers = [(0.2, 0.3, 0.5, 1), (0.4, 0.4, 0.6, 2), (0.6, 0.6, 0.8, 3)]
+    for color, size, speed, density in layers:
+        glColor3f(color, color, color)
+        glPointSize(size)
+        offset = (background_offset * speed) % widthofscreen
+        for _ in range(100 * density):
+            x = (random.randint(0, widthofscreen) - offset) % widthofscreen
+            y = random.randint(0, heightofscreen)
+            glBegin(GL_POINTS)
+            glVertex2f(x, y)
+            glEnd()
+
+    if not pause:
+        background_offset += 0.5
+
+
+# def draw_obstacle(obstacle):
+#     glColor3f(1, 0, 0)
+#     glPointSize(obstacle["size"])
+#     glBegin(GL_POINTS)
+#     glVertex2f(obstacle["x"], obstacle["y"])
+#     glEnd()
+
+def draw_obstacle(obstacle):
+    if obstacle["type"] == "purple":
+        glColor3f(0.5, 0, 0.5)  # Purple color
+    else:
+        glColor3f(1, 0, 0)  # Red color for regular obstacles
+
+    glBegin(GL_POINTS)
+
+    # Get the obstacle's position and size
+    x_center = obstacle["x"]
+    y_center = obstacle["y"]
+    size = obstacle["size"]
+
+    # Draw diamond shape using points
+    for i in range(-size, size + 1):
+        for j in range(-size, size + 1):
+            # Only draw points that form the diamond
+            if abs(i) + abs(j) <= size:
+                glVertex2f(x_center + i, y_center + j)
+
+    glEnd()
+
+
+def draw_powerup(powerup):
+    if powerup["type"] == "life":
+        # Draw a green heart for "life" power-ups
+        glColor3f(0, 1, 0)  # Green
+        glPointSize(3)
+        glBegin(GL_POINTS)
+        draw_heart_outline(powerup["x"], powerup["y"])
+        glEnd()
+    elif powerup["type"] == "shield":
+        # Draw a static blue circle for "shield" power-ups
+        glColor3f(0, 0, 1)  # Blue
+        glPointSize(3)
+        glBegin(GL_POINTS)
+        midpoint_circle(powerup["x"], powerup["y"], 10)  # Fixed radius
+        glEnd()
+    elif powerup["type"] == "score_boost":
+        # Draw another shape (optional) for score boosts
+        glColor3f(1, 1, 0)  # Yellow
+        glPointSize(5)
+        glBegin(GL_POINTS)
+        midpoint_circle(powerup["x"], powerup["y"], 8)
+        glEnd()
+
+
+def draw_heart_outline(x_center, y_center):
+    radius = 6  # Radius of the heart lobes
+
+    # Draw the left lobe
+    midpoint_circle(x_center - radius, y_center, radius)
+
+    # Draw the right lobe
+    midpoint_circle(x_center + radius, y_center, radius)
+
+    # Draw bottom triangular part
+    draw_line_points(x_center - 2 * radius, y_center, x_center, y_center - 3 * radius)
+    draw_line_points(x_center + 2 * radius, y_center, x_center, y_center - 3 * radius)
+    draw_line_points(x_center - 2 * radius, y_center, x_center + 2 * radius, y_center)
+
+
+def midpoint_circle(x_center, y_center, radius):
+    x = 0
+    y = radius
+    d = 1 - radius
+
+    while x <= y:
+        # Plot the eight symmetry points of the circle
+        plot_circle_points(x_center, y_center, x, y)
+        if d < 0:
+            d += 2 * x + 3
+        else:
+            d += 2 * (x - y) + 5
+            y -= 1
+        x += 1
+
+
+def plot_circle_points(x_center, y_center, x, y):
+    glVertex2f(x_center + x, y_center + y)
+    glVertex2f(x_center - x, y_center + y)
+    glVertex2f(x_center + x, y_center - y)
+    glVertex2f(x_center - x, y_center - y)
+    glVertex2f(x_center + y, y_center + x)
+    glVertex2f(x_center - y, y_center + x)
+    glVertex2f(x_center + y, y_center - x)
+    glVertex2f(x_center - y, y_center - x)
+
+
+def draw_line_points(x1, y1, x2, y2):
+    dx = abs(x2 - x1)
+    dy = abs(y2 - y1)
+    sx = 1 if x2 > x1 else -1
+    sy = 1 if y2 > y1 else -1
+
+    if dx > dy:
+        err = dx / 2.0
+        while x1 != x2:
+            glVertex2f(x1, y1)
+            err -= dy
+            if err < 0:
+                y1 += sy
+                err += dx
+            x1 += sx
+    else:
+        err = dy / 2.0
+        while y1 != y2:
+            glVertex2f(x1, y1)
+            err -= dx
+            if err < 0:
+                x1 += sx
+                err += dy
+            y1 += sy
+
+    glVertex2f(x2, y2)  # Plot the last point
+
+
+def draw_bullet(bullet):
+    glColor3f(1, 1, 0)
+    glPointSize(bullet["size"])
+    glBegin(GL_POINTS)
+    glVertex2f(bullet["x"], bullet["y"])
+    glEnd()
+
+
+def update_game():
+    global score, lives, level, game_over, shield_active, shield_timer, invincible
+
+    if not pause and not game_over:
+        # Update shield
+        if shield_active:
+            shield_timer -= 1
+            if shield_timer <= 0:
+                shield_active = False
+
+        # Update objects
+        for obstacle in obstacles[:]:
+            obstacle["x"] -= obstacle["speed"]  # Use dynamic speed based on type
+            if obstacle["x"] < 0:  # Remove if out of screen
+                obstacles.remove(obstacle)
+                continue
+
+            if not shield_active and not invincible:
+                if check_collision(catch1, catch2, obstacle["x"], obstacle["y"], 50, obstacle["size"]):
+                    lives -= 1
+                    invincible = True
+                    glutTimerFunc(2000, reset_invincibility, 0)
+                    obstacles.remove(obstacle)
+                    if lives <= 0:
+                        game_over = True
+                    continue
+
+        # Update powerups
+        for powerup in powerups[:]:
+            powerup["x"] -= 3
+            if powerup["x"] < 0:
+                powerups.remove(powerup)
+                continue
+
+            if check_collision(catch1, catch2, powerup["x"], powerup["y"], 50, powerup["size"]):
+                apply_powerup(powerup["type"])
+                powerups.remove(powerup)
+
+        # Level progression
+        if level != "HARD" and score >= level_configs[level]["next_level_score"]:
+            level = "MEDIUM" if level == "EASY" else "HARD"
+
+
+
+def reset_invincibility(value):
+    global invincible
+    invincible = False
+
+
+def check_collision(x1, y1, x2, y2, r1, r2):
+    return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) < (r1 + r2)
+
+
+def apply_powerup(powerup_type):
+    global lives, score, shield_active, shield_timer
+
+    if powerup_type == "life":
+        lives = min(lives + 1, 5)  # Increase lives, max 5
+    elif powerup_type == "shield":
+        shield_active = True
+        shield_timer = 300  # Activate shield for a specific duration
+    elif powerup_type == "score_boost":
+        score += 500  # Add 500 to the score
+
+
+# Add a new global variable
+level_selection = True  # Indicates whether the game is in the level selection phase
+
+def draw_points(x, y):
+    glPointSize(2)
+    glBegin(GL_POINTS)
+    glVertex2f(x, y)
+    glEnd()
+
+def zone_finder(x, y):
+    if (x >= 0 and y >= 0):  # first quadrent
+        if x >= y:
+            return 0
+        else:
+            return 1
+    elif (x < 0 and y >= 0):  # 2nd quad
+        if abs(x) >= y:
+            return 3
+        else:
+            return 2
+    elif (x < 0 and y < 0):
+        if abs(x) >= abs(y):
+            return 4
+        else:
+            return 5
+    else:
+        if x > abs(y):
+            return 7
+        else:
+            return 6
+
+
+def line_zone_finder(x1, y1, x2, y2):
+    dx = x2 - x1
+    dy = y2 - y1
+    if (abs(dx) >= abs(dy)):  # possible zones 0,3,4,7
+        if (dx >= 0 and dy >= 0):
+            return 0
+        elif (dx >= 0 and dy < 0):
+            return 7
+        elif (dx < 0 and dy < 0):
+            return 4
+        else:
+            return 3
+    else:  # possible zones 1,2,5,6
+        if (dx >= 0 and dy >= 0):
+            return 1
+        elif (dx >= 0 and dy < 0):
+            return 2
+        elif (dx < 0 and dy < 0):
+            return 5
+        else:
+            return 6
+
+
+def map_to_0(x, y, z):
+    if z == 0:
+        return x, y
+    elif z == 1:
+        return y, x
+    elif z == 2:
+        return -y, x
+    elif z == 3:
+        return -x, y
+    elif z == 4:
+        return -x, -y
+    elif z == 5:
+        return -y, -x
+    elif z == 6:
+        return y, -x
+    elif z == 7:
+        return x, -y
+
+
+def map_to_others(x, y, z):
+    if z == 0:
+        return x, y
+    elif z == 1:
+        return y, x
+    elif z == 2:
+        return y, -x
+    elif z == 3:
+        return -x, y
+    elif z == 4:
+        return -x, -y
+    elif z == 5:
+        return -y, -x
+    elif z == 6:
+        return -y, x
+    elif z == 7:
+        return x, -y
+
+
+def draw_line(start, end):
+    x1, y1 = start
+    x2, y2 = end
+
+    line_zone = line_zone_finder(x1, y1, x2, y2)
+
+    z0_x1, z0_y1 = map_to_0(x1, y1, line_zone)  # after converting to zone 0
+    z0_x2, z0_y2 = map_to_0(x2, y2, line_zone)
+
+    dx = z0_x2 - z0_x1
+    dy = z0_y2 - z0_y1
+
+    determiner = 2 * dy - dx  # d_init
+
+    draw_points(x1, y1)
+    while z0_x1 <= z0_x2:
+        if determiner < 0:  # EAST
+            determiner += (2 * dy)
+            z0_x1 += 1
+        else:
+            determiner += (2 * (dy - dx))  # NORTH EAST
+            z0_x1 += 1
+            z0_y1 += 1
+        x_n, y_n = map_to_others(z0_x1, z0_y1, line_zone)
+        draw_points(x_n, y_n)
+
+def draw_cross_button():
+    # Draw exit button in top right corner
+    glColor3f(0.8, 0.3, 0.3)  # Red color
+    button_size = 30
+    x1, y1 = widthofscreen - 50, heightofscreen - 50
+    x2, y2 = x1 + button_size, y1 + button_size
+    draw_line((x1, y1), (x2, y2))
+    draw_line((x1, y2), (x2, y1))
+    glColor3f(1, 1, 1)  # Reset color
+
+def draw_pause_button():
+    # Draw pause button in top middle
+    global pause
+    button_size = 30
+    center_x = widthofscreen // 2
+    top_y = heightofscreen - 50
+    
+    if not pause:
+        # Draw pause bars
+        glColor3f(0.3, 0.3, 0.8)
+        draw_line((center_x - 10, top_y), (center_x - 10, top_y + button_size))
+        draw_line((center_x + 10, top_y), (center_x + 10, top_y + button_size))
+    else:
+        glColor3f(0.3, 0.3, 0.8)
+        draw_line((center_x - 10, top_y), (center_x + 15, top_y + button_size//2))
+        draw_line((center_x + 15, top_y + button_size//2), (center_x - 10, top_y + button_size))
+    glColor3f(1, 1, 1)
+
+def draw_reset_button():
+    # Draw reset button in top left corner
+    glColor3f(0.3, 0.8, 0.3)  # Green color
+    button_size = 30
+    x, y = 20, heightofscreen - 50
+    # Draw circular arrow
+    draw_line((x, y + button_size//2), (x + button_size, y + button_size//2))
+    draw_line((x + button_size//2, y), (x + button_size, y + button_size//2))
+    draw_line((x + button_size//2, y + button_size), (x + button_size, y + button_size//2))
+    glColor3f(1, 1, 1)
+
+# def check_button_click(x, y):
+#     y = heightofscreen - y  # Flip y coordinate to match OpenGL's coordinate system
+#     button_size = 30
+#     # Check pause button (middle top)
+#     center_x = widthofscreen // 2
+#     if (center_x - 15 <= x <= center_x + 15 and heightofscreen - 50 <= y <= heightofscreen - 20):
+#         return "pause"
+#     # Check reset button (top left)
+#     elif (20 <= x <= 20 + button_size and heightofscreen - 50 <= y <= heightofscreen - 50 + button_size):
+#         return "reset"
+#     # Check exit button (top right)
+#     elif (widthofscreen - 50 <= x <= widthofscreen - 50 + button_size and heightofscreen - 50 <= y <= heightofscreen - 50 + button_size):
+#         return "exit"
+#     return None
+
+
+def reset_game():
+    global lives, score, level, obstacles, powerups, bullets, game_over, pause
+    lives = 3
+    score = 0
+    level = "EASY"
+    obstacles = []
+    powerups = []
+    bullets = []
+    game_over = False
+    pause = False
+
+def mouseListener(button, state, x, y):
+    global pause, game_over, level_selection
+    if button == GLUT_LEFT_BUTTON and state == GLUT_DOWN:
+        if not level_selection and not game_over:  # Only process clicks during gameplay
+            clicked = check_button_click(x, y)
+            if clicked == "pause":
+                pause = not pause
+            elif clicked == "reset":
+                reset_game()
+            elif clicked == "exit":
+                glutLeaveMainLoop()
+
+def check_button_click(x, y):
+    # Flip y-coordinate to match OpenGL's coordinate system
+    y = heightofscreen - y
+
+    button_size = 30
+    # Check pause button (middle top)
+    center_x = widthofscreen // 2
+    if (center_x - 15 <= x <= center_x + 15 and heightofscreen - 50 <= y <= heightofscreen - 20):
+        return "pause"
+    # Check reset button (top left)
+    elif (20 <= x <= 20 + button_size and heightofscreen - 50 <= y <= heightofscreen - 50 + button_size):
+        return "reset"
+    # Check exit button (top right)
+    elif (widthofscreen - 50 <= x <= widthofscreen - 50 + button_size and heightofscreen - 50 <= y <= heightofscreen - 50 + button_size):
+        return "exit"
+    return None
+
+
+def display():
+    global level_selection
+
+    glClear(GL_COLOR_BUFFER_BIT)
+    glClearColor(0.05, 0.05, 0.1, 1)
+
+    if level_selection:
+        # Display level selection screen
+        glColor3f(1, 1, 1)
+        draw_text("Select Level: [1] EASY, [2] MEDIUM, [3] HARD", widthofscreen // 2 - 200, heightofscreen // 2)
+    else:
+        # Game screen
+        draw_background()
+        draw_spaceship(catch1, catch2)
+
+        for obstacle in obstacles:
+            draw_obstacle(obstacle)
+        for powerup in powerups:
+            draw_powerup(powerup)
+        for bullet in bullets:
+            draw_bullet(bullet)
+
+        # HUD
+        glColor3f(1, 1, 1)
+        draw_text(f"Level: {level}", 10, heightofscreen - 30)
+        draw_text(f"Lives: {lives}", 10, heightofscreen - 60)
+        draw_text(f"Score: {score}", 10, heightofscreen - 90)
+        draw_cross_button()
+        draw_pause_button()
+        draw_reset_button()
+        
+
+        if game_over:
+            draw_text("GAME OVER - Press R to Restart", widthofscreen // 2 - 100, heightofscreen // 2)
+        elif pause:
+            draw_text("PAUSED - Press P to Resume", widthofscreen // 2 - 100, heightofscreen // 2)
+
+    glutSwapBuffers()
+
+
+def keyboard(key, x, y):
+    global catch1, catch2, game_over, pause, lives, score, level, obstacles, powerups, bullets, last_shot_time, level_selection
+
+    if level_selection:
+        # Handle level selection input
+        if key == b'1':
+            level = "EASY"
+            level_selection = False
+        elif key == b'2':
+            level = "MEDIUM"
+            level_selection = False
+        elif key == b'3':
+            level = "HARD"
+            level_selection = False
+    else:
+        # Handle gameplay input
+        if key == b'r' and game_over:
+            game_over = False
+            lives = 3
+            score = 0
+            level = "EASY"
+            obstacles = []
+            powerups = []
+            bullets = []
+            level_selection = True
+        elif key == b'p':
+            pause = not pause
+        elif not pause and not game_over:
+            if key == b'w':
+                catch2 = min(catch2 + 10, heightofscreen - 50)
+            elif key == b's':
+                catch2 = max(catch2 - 10, 50)
+            elif key == b'a':
+                catch1 = max(catch1 - 10, 50)
+            elif key == b'd':
+                catch1 = min(catch1 + 10, widthofscreen - 50)
+            elif key == b' ':
+                current_time = glutGet(GLUT_ELAPSED_TIME)
+                if current_time - last_shot_time > 250:  # Shooting cooldown
+                    bullets.append({"x": catch1, "y": catch2, "size": 5})
+                    last_shot_time = current_time
+
+
+def draw_text(text, x, y):
+    glRasterPos2f(x, y)
+    for char in text:
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, ord(char))
+
+
+def game_timer(value):
+    global score, pause, game_over, bullets, obstacles, powerups
+
+    if not pause and not game_over:
+        update_game()
+
+        if random.random() < level_configs[level]["spawn_rate"]:
+            create_obstacle()
+        if random.random() < 0.02:
+            create_powerup()
+
+        # Update bullets
+        for bullet in bullets[:]:
+            bullet["x"] += 10
+            if bullet["x"] > widthofscreen:
+                bullets.remove(bullet)
+            else:
+                for obstacle in obstacles[:]:
+                    if check_collision(bullet["x"], bullet["y"],
+                                       obstacle["x"], obstacle["y"],
+                                       bullet["size"], obstacle["size"]):
+                        create_particles(obstacle["x"], obstacle["y"], (1, 0, 0), count=20)
+                        obstacles.remove(obstacle)
+                        bullets.remove(bullet)
+                        score += 100
+                        break
+
+        update_particles()
+
+    glutPostRedisplay()
+    glutTimerFunc(16, game_timer, 0)
+
+
+def init():
+    glutInit()
+    glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE)
+    glutInitWindowSize(widthofscreen, heightofscreen)
+    glutCreateWindow(b"Ariel Challenge")
+    glOrtho(0, widthofscreen, 0, heightofscreen, -1, 1)
+    glutDisplayFunc(display)
+    glutKeyboardFunc(keyboard)
+    glutMouseFunc(mouseListener)
+    glutTimerFunc(0, game_timer, 0)
+    glutMainLoop()
+    
+
+
+if __name__ == "__main__":
+    init()
